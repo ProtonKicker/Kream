@@ -528,13 +528,16 @@ tasks.register('bundleKlipper') {
             // Moonraker reports its version from git / pip metadata / a version
             // file — the bundle is none of those, so /server/info returned
             // "Version: ?". Stamp moonraker/__version__.py (the path pdm-build
-            // would generate) from the vendored changelog's top entry.
-            var mrChangelog = file('src/main/moonraker/docs/changelog.md')
-            var mrVersion = 'v0.0.0-beam'
-            if (mrChangelog.exists()) {
-                var mrMatch = (mrChangelog.text =~ /(?m)^##\s*\[([0-9]+\.[0-9]+\.[0-9]+)\]/)
-                if (mrMatch.find()) mrVersion = 'v' + mrMatch.group(1) + '-beam'
-            }
+            // would generate) from 'moonraker_version', a plain marker file
+            // (same idea as beam_ext/ext_version) updated by hand whenever the
+            // vendored Moonraker source is re-synced. NOT derived from
+            // docs/changelog.md: upstream stopped adding numbered "## [x.y.z]"
+            // headings after 0.8.0 (2023) and has kept everything under
+            // "## [Unreleased]" since, so parsing the changelog's top heading
+            // always resolved to the stale "v0.8.0" regardless of how current
+            // the actual vendored source was.
+            var mrVersionFile = file('src/main/moonraker/moonraker_version')
+            var mrVersion = mrVersionFile.exists() ? (mrVersionFile.text.trim() + '-beam') : 'v0.0.0-beam'
             var mrVerFile = new File(assets, 'moonraker/moonraker/__version__.py')
             mrVerFile.getParentFile().mkdirs()
             mrVerFile.text = "__version__ = '" + mrVersion + "'\n"
