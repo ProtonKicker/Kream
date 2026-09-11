@@ -798,10 +798,14 @@ class MCU:
         # Restarts
         restart_methods = [None, "arduino", "cheetah", "command", "rpi_usb"]
         self._restart_method = "command"
+        # Beam changed: always consume 'restart_method' even when self._baud is 0
+        # (the virtual-serial path), otherwise check_unused_options() aborts
+        # startup with "Option 'restart_method' is not valid in section 'mcu'".
+        cfg_restart_method = config.getchoice(
+            "restart_method", restart_methods, None
+        )
         if self._baud:
-            self._restart_method = config.getchoice(
-                "restart_method", restart_methods, None
-            )
+            self._restart_method = cfg_restart_method
         self._reset_cmd = self._config_reset_cmd = None
         self._is_mcu_bridge = False
         self._emergency_stop_cmd = None

@@ -30,6 +30,7 @@ class KlipperApp : MultiDexApplication() {
     override fun onCreate() {
         super.onCreate()
         INSTANCE = this
+        installCrashLogger()
         Prefs.init(this)
         EventBus.registerImpl(this)
 
@@ -75,6 +76,33 @@ class KlipperApp : MultiDexApplication() {
             appScope.launch(Dispatchers.IO) {
                 UsbSerialManager.init(this@KlipperApp)
             }
+        }
+    }
+
+    /**
+     * Persist any uncaught exception (from any process) to a file under the app's
+     * external files dir so a "opens and closes" crash on devices we can't attach
+     * to (e.g. Galaxy S10+) leaves a readable stack trace behind.
+     */
+    private fun installCrashLogger() {
+        val previous = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
+            try {
+                val dir = getExternalFilesDir(null) ?: filesDir
+                val f = File(dir, "last_crash.txt")
+                f.writeText(buildString {
+                    append("time=").append(System.currentTimeMillis()).append('\n')
+                    append("process=").append(getProcessNameCompatInternal()).append('\n')
+                    append("thread=").append(thread.name).append('\n')
+                    append("device=").append(Build.MANUFACTURER).append(' ').append(Build.MODEL)
+                        .append(" sdk=").append(Build.VERSION.SDK_INT).append('\n')
+                    append("abi=").append(Build.SUPPORTED_ABIS.joinToString(",")).append("\n\n")
+                    append(Log.getStackTraceString(throwable))
+                })
+                Log.e("beam_crash", "Uncaught exception on ${thread.name}", throwable)
+            } catch (_: Throwable) {
+            }
+            previous?.uncaughtException(thread, throwable)
         }
     }
 

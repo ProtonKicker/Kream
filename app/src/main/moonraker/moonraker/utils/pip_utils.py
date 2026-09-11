@@ -12,6 +12,7 @@ import subprocess
 import pathlib
 import shutil
 import threading
+import logging
 from dataclasses import dataclass
 
 # Annotation imports
@@ -31,8 +32,11 @@ if TYPE_CHECKING:
     from ..server import Server
     from ..components.shell_command import ShellCommandFactory
 
-MIN_PIP_VERSION = (23, 3, 2)
+MAX_PIP_VERSION = (25, 2)
 MIN_PYTHON_VERSION = (3, 7)
+
+class PipException(Exception):
+    pass
 
 # Synchronous Subprocess Helpers
 def _run_subprocess_with_response(
@@ -48,7 +52,7 @@ def _run_subprocess_with_response(
     if proc.returncode == 0:
         return proc.stdout.strip()
     err = proc.stderr
-    raise Exception(f"Failed to run pip command '{cmd}': {err}")
+    raise PipException(f"Failed to run pip command '{cmd}': {err}")
 
 def _process_subproc_output(
     stdout: IO[str],
@@ -80,9 +84,9 @@ def _run_subprocess(
             process.wait(timeout)
     ret = process.poll()
     if ret != 0:
-        raise Exception(f"Failed to run pip command '{cmd}'")
+        raise PipException(f"Failed to run pip command '{cmd}'")
 
-@ dataclass(frozen=True)
+@dataclass(frozen=True)
 class PipVersionInfo:
     pip_version_string: str
     python_version_string: str
@@ -94,6 +98,26 @@ class PipVersionInfo:
     @property
     def python_version(self) -> Tuple[int, ...]:
         return tuple(int(part) for part in self.python_version_string.split("."))
+
+    @property
+    def needs_pip_update(self) -> bool:
+        return self.pip_version < self.max_pip_version
+
+    @property
+    def max_pip_version(self) -> Tuple[int, ...]:
+        python_version = self.python_version
+        if python_version < (3, 7):
+            return (20, 3, 4)
+        if python_version < (3, 8):
+            return (24, 0)
+        elif python_version < (3, 9):
+            return (25, 0, 1)
+        else:
+            return MAX_PIP_VERSION
+
+    @property
+    def max_pip_version_string(self) -> str:
+        return ".".join(str(p) for p in self.max_pip_version)
 
 class PipExecutor:
     def __init__(
@@ -122,9 +146,13 @@ class PipExecutor:
         resp = self.call_pip_with_response("--version", 10.)
         return parse_pip_version(resp)
 
-    def update_pip(self) -> None:
-        pip_ver = ".".join([str(part) for part in MIN_PIP_VERSION])
-        self.call_pip(f"install pip=={pip_ver}", 120.)
+    def update_pip(self, version: str | None = None) -> None:
+        if version is None:
+            version = ".".join([str(part) for part in MAX_PIP_VERSION])
+        try:
+            self.call_pip(f"install -U pip<={version}", 120.)
+        except PipException:
+            logging.exception("Failed to update pip")
 
     def install_packages(
         self,
@@ -165,19 +193,58 @@ class AsyncPipExecutor:
     def get_shell_cmd(self) -> ShellCommandFactory:
         return self.server.lookup_component("shell_command")
 
+    async def call_pip_with_response(
+        self,
+        args: str,
+        timeout: float = 30.,
+        attempts: int = 3,
+        sys_env_vars: Optional[Dict[str, Any]] = None
+    ) -> str:
+        env: Optional[Dict[str, str]] = None
+        if sys_env_vars is not None:
+            env = dict(os.environ)
+            env.update(sys_env_vars)
+        shell_cmd = self.get_shell_cmd()
+        return await shell_cmd.exec_cmd(
+            f"{self.pip_cmd} {args}", attempts=attempts,
+            timeout=timeout, env=env, log_stderr=True
+        )
+
+    async def call_pip(
+        self,
+        args: str,
+        timeout: float = 30.,
+        attempts: int = 3,
+        sys_env_vars: Optional[Dict[str, Any]] = None
+    ) -> None:
+        env: Optional[Dict[str, str]] = None
+        if sys_env_vars is not None:
+            env = dict(os.environ)
+            env.update(sys_env_vars)
+        shell_cmd = self.get_shell_cmd()
+        await shell_cmd.run_cmd_async(
+            f"{self.pip_cmd} {args}", self.notify_callback,
+            timeout=timeout, attempts=attempts, env=env,
+            log_stderr=True
+        )
+
     async def get_pip_version(self) -> PipVersionInfo:
         resp: str = await self.get_shell_cmd().exec_cmd(
             f"{self.pip_cmd} --version", timeout=30., attempts=3, log_stderr=True
         )
         return parse_pip_version(resp)
 
-    async def update_pip(self) -> None:
-        pip_ver = ".".join([str(part) for part in MIN_PIP_VERSION])
+    async def update_pip(self, version: str | None = None) -> None:
+        if version is None:
+            version = ".".join([str(part) for part in MAX_PIP_VERSION])
         shell_cmd = self.get_shell_cmd()
-        await shell_cmd.run_cmd_async(
-            f"{self.pip_cmd} install pip=={pip_ver}",
-            self.notify_callback, timeout=1200., attempts=3, log_stderr=True
-        )
+        try:
+            await shell_cmd.run_cmd_async(
+                f"{self.pip_cmd} install -U pip<={version}",
+                self.notify_callback, timeout=1200., attempts=1, log_stderr=True
+            )
+        except shell_cmd.error:
+            logging.exception("Failed to Update Pip")
 
     async def install_packages(
         self,
@@ -231,17 +298,12 @@ def parse_pip_version(pip_response: str) -> PipVersionInfo:
     pyver_str: str = match.group(2).strip()
     return PipVersionInfo(pipver_str, pyver_str)
 
-def check_pip_needs_update(version_info: PipVersionInfo) -> bool:
-    if version_info.python_version < MIN_PYTHON_VERSION:
-        return False
-    return version_info.pip_version < MIN_PIP_VERSION
-
 def prepare_install_args(packages: Union[pathlib.Path, List[str]]) -> str:
     if isinstance(packages, pathlib.Path):
         if not packages.is_file():
             raise FileNotFoundError(
                 f"Invalid path to requirements_file '{packages}'"
             )
-        return f"-r {packages}"
+        return f"-U -r {packages}"
     reqs = [req.replace("\"", "'") for req in packages]
-    return " ".join([f"\"{req}\"" for req in reqs])
+    return "-U " + " ".join([f"\"{req}\"" for req in reqs])

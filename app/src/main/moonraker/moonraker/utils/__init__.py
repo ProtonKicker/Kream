@@ -21,6 +21,7 @@ import socket
 import enum
 import ipaddress
 import platform
+from .exceptions import ServerError
 from . import source_info
 from . import json_wrapper
 
@@ -38,6 +39,7 @@ from typing import (
 if TYPE_CHECKING:
     from types import ModuleType
     from asyncio.trsock import TransportSocket
+    from tornado.httputil import HTTPServerRequest
 
 SYS_MOD_PATHS = glob.glob("/usr/lib/python3*/dist-packages")
 SYS_MOD_PATHS += glob.glob("/usr/lib/python3*/site-packages")
@@ -48,11 +50,6 @@ try:
     KERNEL_VERSION = tuple([int(part) for part in platform.release().split(".")[:2]])
 except Exception:
     KERNEL_VERSION = (0, 0)
-
-class ServerError(Exception):
-    def __init__(self, message: str, status_code: int = 400) -> None:
-        Exception.__init__(self, message)
-        self.status_code = status_code
 
 
 class Sentinel(enum.Enum):
@@ -140,7 +137,7 @@ def get_repo_info(source_path: str) -> Dict[str, Any]:
                 comp = parts[1].split("/", maxsplit=1)[-1]
                 repo_info["unofficial_components"].append(comp)
     except Exception:
-        logging.exception("Error Retreiving Git Repo Info")
+        logging.exception("Error Retrieving Git Repo Info")
     return repo_info
 
 def get_software_info() -> Dict[str, Any]:
@@ -274,8 +271,21 @@ def pretty_print_time(seconds: int) -> str:
         fmt_list.append(f"{val} {ident}" if val == 1 else f"{val} {ident}s")
     return ", ".join(fmt_list)
 
-def parse_ip_address(address: str) -> Optional[IPAddress]:
-    try:
-        return ipaddress.ip_address(address)
-    except Exception:
-        return None
+def parse_ip_address(address: str | None, log_err: bool = False) -> IPAddress | None:
+    if address:
+        try:
+            return ipaddress.ip_address(address)
+        except ValueError:
+            if log_err:
+                logging.exception(f"Failed to Parse IP Address {address}")
+    return None
+
+def get_proxy_ip(request: HTTPServerRequest) -> str | None:
+    ctx = getattr(request.connection, "context", None)
+    return getattr(ctx, "_orig_remote_ip", None)
+
+def check_request_proxied(request: HTTPServerRequest) -> bool:
+    return (
+        "X-Forwarded-For" in request.headers or
+        "X-Real-Ip" in request.headers
+    )

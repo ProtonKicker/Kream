@@ -42,10 +42,12 @@ import org.nanohttpd.protocols.websockets.WebSocketFrame
 import ru.ytkab0bp.beamklipper.KlipperApp
 import ru.ytkab0bp.beamklipper.KlipperInstance
 import ru.ytkab0bp.beamklipper.R
+import ru.ytkab0bp.beamklipper.events.WebFrontendChangedEvent
 import ru.ytkab0bp.beamklipper.serial.KlipperProbeTable
 import ru.ytkab0bp.beamklipper.serial.UsbSerialManager
 import ru.ytkab0bp.beamklipper.utils.Prefs
 import ru.ytkab0bp.beamklipper.utils.ViewUtils
+import ru.ytkab0bp.eventbus.EventHandler
 import java.io.File
 import java.io.IOException
 import java.io.InputStream
@@ -65,20 +67,28 @@ import java.util.regex.Pattern
 
 class WebService : Service() {
     companion object {
-        const val PORT = 8889
+        const val PORT_FLUIDD = 4408
+        const val PORT_MAINSAIL = 4409
+        fun getPort(): Int = if (Prefs.webFrontend == Prefs.FRONTEND_FLUIDD) PORT_FLUIDD else PORT_MAINSAIL
         private const val ID = 300000
         private const val BEEPER_SAMPLE_RATE = 8000
         private val API_PATTERN = Pattern.compile("^/(printer|api|access|machine|server)/")
         private var mPrefs: SharedPreferences? = null
         private val dateFormat = SimpleDateFormat("EEE, dd MMM yyyy HH:mm:ss zzz", Locale.ROOT)
-        private val MOONRAKER_PORT_RE = Regex("port: (\\d+)")
+        // Moonraker's config is Python-configparser style: the key/value separator
+        // may be ':' or '='. assets/moonraker/default.conf writes "port: <n>", and
+        // BaseMoonrakerService.MOONRAKER_PORT_PATTERN also expects the colon form —
+        // an '='-only regex here never matched, so getMoonrakerPort() always fell
+        // through to the fragile /proc/net/tcp scan (or the 7125 fallback) and the
+        // proxy pointed at the wrong port ("Cannot connect to Moonraker").
+        private val MOONRAKER_PORT_RE = Regex("^\\s*port\\s*[:=]\\s*(\\d+)", RegexOption.MULTILINE)
 
         init {
             System.loadLibrary("beeper")
         }
     }
 
-    private val httpServer = HttpServer()
+    private var httpServer = HttpServer(getPort())
     private var notificationManager: NotificationManager? = null
     private var beeperThread: HandlerThread? = null
     private var beeperHandler: Handler? = null
@@ -112,16 +122,31 @@ class WebService : Service() {
         } catch (e: IOException) {
             throw RuntimeException(e)
         }
+        KlipperApp.EVENT_BUS.registerListener(this)
     }
 
     override fun onDestroy() {
         super.onDestroy()
+        KlipperApp.EVENT_BUS.unregisterListener(this)
         httpServer.stop()
         beeperThread?.quit()
         beeperThread = null
         beeperHandler = null
         stopForeground(true)
         notificationManager?.cancel(ID)
+    }
+
+    @EventHandler(runOnMainThread = true)
+    fun onWebFrontendChanged(e: WebFrontendChangedEvent) {
+        val newPort = getPort()
+        if (newPort == httpServer.listeningPort) return
+        httpServer.stop()
+        httpServer = HttpServer(newPort)
+        try {
+            httpServer.start()
+        } catch (e: IOException) {
+            Log.e("WebService", "Failed to restart HTTP server on port $newPort", e)
+        }
     }
 
     private fun getMoonrakerPort(): Int {
@@ -485,24 +510,47 @@ class WebService : Service() {
         }
     }
 
-    private inner class HttpServer : NanoWSD(PORT) {
+    private inner class HttpServer(port: Int) : NanoWSD(port) {
+        // Fluidd/Mainsail ship web fonts (.woff2/.woff/.ttf), SVG theme logos,
+        // PNG icons, a web manifest and JSON config alongside the JS/CSS bundle.
+        // NanoHTTPD does no content-type guessing, so anything not mapped here
+        // went out as text/plain — WebView then refuses to use it as a font or
+        // to render an <img>/CSS SVG, which is why the UI came up unstyled with
+        // missing logos.
+        private fun mimeTypeFor(path: String): String = when (path.substringAfterLast('.', "").lowercase()) {
+            "js", "mjs" -> "text/javascript"
+            "html", "htm" -> "text/html"
+            "css" -> "text/css"
+            "json", "map" -> "application/json"
+            "webmanifest" -> "application/manifest+json"
+            "svg" -> "image/svg+xml"
+            "png" -> "image/png"
+            "jpg", "jpeg" -> "image/jpeg"
+            "gif" -> "image/gif"
+            "webp" -> "image/webp"
+            "ico" -> "image/x-icon"
+            "woff2" -> "font/woff2"
+            "woff" -> "font/woff"
+            "ttf" -> "font/ttf"
+            "eot" -> "application/vnd.ms-fontobject"
+            "wasm" -> "application/wasm"
+            "xml" -> "application/xml"
+            "txt" -> "text/plain"
+            else -> "application/octet-stream"
+        }
+
         private fun serveStatic(path: String): Response {
             val ctx = KlipperApp.INSTANCE
             val resolvedPath = if (path == "/") "/index.html" else path
             try {
-                val mimeType = when {
-                    resolvedPath.endsWith(".js") -> "text/javascript"
-                    resolvedPath.endsWith(".html") -> "text/html"
-                    resolvedPath.endsWith(".css") -> "text/css"
-                    else -> "text/plain"
-                }
+                val mimeType = mimeTypeFor(resolvedPath)
                 val prefix = Prefs.webFrontend
                 val assetPath = prefix + resolvedPath
                 val input = ctx.assets.open(assetPath)
                 val response = Response.newChunkedResponse(Status.OK, mimeType, input)
                 response.addHeader("Date", dateFormat.format(Date()))
                 response.addHeader("Last-Modified", lastModifiedString)
-                if (resolvedPath.endsWith(".html") || resolvedPath.endsWith(".json")) {
+                if (resolvedPath.endsWith(".html") || resolvedPath.endsWith(".json") || resolvedPath.endsWith(".webmanifest")) {
                     response.addHeader("Cache-Control", "no-cache, no-store, must-revalidate")
                     response.addHeader("Pragma", "no-cache")
                     response.addHeader("Expires", "0")
@@ -511,7 +559,12 @@ class WebService : Service() {
                 }
                 return response
             } catch (e: IOException) {
-                if (path == "/index.html" || path == "/") {
+                // A missing path with a file extension is a real 404 (a stale
+                // hashed chunk, a bad asset URL). Only extensionless paths are
+                // client-side routes that must fall through to index.html —
+                // returning HTML for a missing .js just yields a MIME error.
+                val hasExtension = resolvedPath.substringAfterLast('/').contains('.')
+                if (path == "/index.html" || path == "/" || hasExtension) {
                     return Response.newFixedLengthResponse(Status.NOT_FOUND, "text/plain", "Not Found")
                 }
                 return serveStatic("/index.html")
@@ -629,19 +682,46 @@ class WebService : Service() {
                     con.requestMethod = session.method.name
                     for ((key, value) in session.headers) {
                         when (key.lowercase()) {
-                            "host", "connection", "content-length", "transfer-encoding", "keep-alive", "proxy-connection" -> {}
+                            // hop-by-hop + length headers we rebuild ourselves,
+                            // plus "remote-addr"/"http-client-ip" which NanoHTTPD
+                            // injects into the header map itself — forwarding
+                            // those upstream confuses Moonraker's proxy detection.
+                            "host", "connection", "content-length", "transfer-encoding",
+                            "keep-alive", "proxy-connection", "remote-addr", "http-client-ip" -> {}
                             else -> con.addRequestProperty(key, value)
                         }
                     }
                     if (session.method == Method.POST || session.method == Method.PUT || session.method == Method.PATCH) {
+                        // NanoHTTPD leaves the request body unconsumed on
+                        // session.inputStream (it never auto-parses it) — but
+                        // that stream is the raw client socket, shared with the
+                        // response path. It must NOT be closed here (that was
+                        // killing the response → the browser saw ERR_EMPTY_RESPONSE
+                        // on every Fluidd file save), and it must be read by an
+                        // exact byte count: on a keep-alive connection it never
+                        // hits EOF, so reading "to end" just blocked for 60s.
+                        val contentLength = session.headers["content-length"]?.toLongOrNull() ?: -1L
                         con.doOutput = true
+                        if (contentLength >= 0) con.setFixedLengthStreamingMode(contentLength)
+                        else con.setChunkedStreamingMode(0)
                         runCatching {
-                            session.inputStream.use { input ->
-                                con.outputStream.use { output ->
+                            val input = session.inputStream
+                            con.outputStream.use { output ->
+                                if (contentLength >= 0) {
+                                    val buf = ByteArray(32768)
+                                    var remaining = contentLength
+                                    while (remaining > 0) {
+                                        val n = input.read(buf, 0, minOf(buf.size.toLong(), remaining).toInt())
+                                        if (n < 0) break
+                                        output.write(buf, 0, n)
+                                        remaining -= n
+                                    }
+                                } else {
                                     pipeStream(input, output, timeoutMs = 60_000L)
                                 }
+                                output.flush()
                             }
-                        }
+                        }.onFailure { Log.w("WebService", "Proxy body forward failed on ${session.uri}", it) }
                     }
                     val responseCode = runCatching { con.responseCode }.getOrElse { (it as? IOException)?.let { _ -> HttpURLConnection.HTTP_INTERNAL_ERROR } ?: 500 }
                     val responseStream = runCatching { if (responseCode in 200..299) con.inputStream else con.errorStream }.getOrNull()

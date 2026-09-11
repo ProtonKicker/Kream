@@ -23,7 +23,13 @@ from tornado.routing import Rule, PathMatches, RuleRouter
 from tornado.http1connection import HTTP1Connection
 from tornado.httpserver import HTTPServer
 from tornado.log import access_log
-from ..utils import ServerError, source_info, parse_ip_address
+from ..utils import (
+    ServerError,
+    source_info,
+    parse_ip_address,
+    get_proxy_ip,
+    check_request_proxied
+)
 from ..common import (
     JsonRPC,
     WebRequest,
@@ -124,10 +130,10 @@ class PrimaryRouter(MutableRouter):
         server = config.get_server()
         max_ws_conns = config.getint('max_websocket_connections', MAX_WS_CONNS_DEFAULT)
         self.verbose_logging = server.is_verbose_enabled()
+        tornado_ver = tornado.version_info
         app_args: Dict[str, Any] = {
             'serve_traceback': self.verbose_logging,
-            'websocket_ping_interval': 10,
-            'websocket_ping_timeout': 30,
+            'websocket_ping_interval': None if tornado_ver < (6, 5) else 10.,
             'server': server,
             'max_websocket_connections': max_ws_conns,
             'log_function': self.log_request
@@ -160,14 +166,19 @@ class PrimaryRouter(MutableRouter):
             log_method = access_log.warning
         else:
             log_method = access_log.error
-        request_time = 1000.0 * handler.request.request_time()
+        req = handler.request
+        request_time = 1000.0 * req.request_time()
         user: Optional[UserInfo] = handler.current_user
         username = "No User"
         if user is not None:
             username = user.username
+        proxy_ip = get_proxy_ip(req)
+        if proxy_ip is not None and check_request_proxied(req):
+            summary = f"{req.method} {req.uri} ({req.remote_ip} via {proxy_ip})"
+        else:
+            summary = f"{req.method} {req.uri} ({req.remote_ip})"
         log_method(
-            f"{status_code} {handler._request_summary()} "
-            f"[{username}] {request_time:.2f}ms"
+            f"{status_code} {summary} [{username}] {request_time:.2f}ms"
         )
 
 class InternalTransport(APITransport):
@@ -200,6 +211,7 @@ class MoonrakerApp:
             "/server/redirect",
             "/server/jsonrpc"
         ]
+        self.use_xheaders = config.getboolean("use_xheaders", True)
         self.max_upload_size = config.getint('max_upload_size', 1024)
         self.max_upload_size *= 1024 * 1024
 
@@ -231,6 +243,7 @@ class MoonrakerApp:
         mimetypes.add_type('text/plain', '.cfg')
 
         # Set up HTTP routing.  Our "mutable_router" wraps a Tornado Application
+        logging.info(f"Detected Tornado Version {tornado.version}")
         self.mutable_router = PrimaryRouter(config)
         for (ptrn, hdlr) in (
             (home_pattern, WelcomeHandler),
@@ -311,17 +324,17 @@ class MoonrakerApp:
     def _create_http_server(
         self, port: int, address: str, **kwargs
     ) -> Optional[HTTPServer]:
-        args: Dict[str, Any] = dict(max_body_size=MAX_BODY_SIZE, xheaders=True)
+        args: Dict[str, Any]
+        args = dict(max_body_size=MAX_BODY_SIZE, xheaders=self.use_xheaders)
         args.update(kwargs)
         svr = HTTPServer(self.mutable_router, **args)
         try:
             svr.listen(port, address)
         except Exception as e:
             svr_type = "HTTPS" if "ssl_options" in args else "HTTP"
-            logging.exception(f"{svr_type} Server Start Failed")
             self.server.add_warning(
                 f"Failed to start {svr_type} server: {e}.  See moonraker.log "
-                "for more details."
+                "for more details.", exc_info=e
             )
             return None
         return svr
@@ -697,11 +710,13 @@ class DynamicRequestHandler(AuthorizedRequestHandler):
         req = f"{self.request.method} {self.request.path}"
         self._log_debug(f"HTTP Request::{req}", args)
         try:
-            ip = parse_ip_address(self.request.remote_ip or "")
+            ip = parse_ip_address(self.request.remote_ip)
             result = await self.api_defintion.request(
                 args, req_type, transport, ip, self.current_user
             )
         except ServerError as e:
+            if self.server.is_verbose_enabled():
+                logging.exception("API Request Failure")
             raise tornado.web.HTTPError(
                 e.status_code, reason=str(e)) from e
         if self.wrap_result:
@@ -731,7 +746,7 @@ class RPCHandler(AuthorizedRequestHandler, APITransport):
 
     @property
     def ip_addr(self) -> Optional[IPAddress]:
-        return parse_ip_address(self.request.remote_ip or "")
+        return parse_ip_address(self.request.remote_ip)
 
     def screen_rpc_request(
         self, api_def: APIDefinition, req_type: RequestType, args: Dict[str, Any]
@@ -762,7 +777,7 @@ class RPCHandler(AuthorizedRequestHandler, APITransport):
 
 class FileRequestHandler(AuthorizedFileHandler):
     def set_extra_headers(self, path: str) -> None:
-        # The call below shold never return an empty string,
+        # The call below should never return an empty string,
         # as the path should have already been validated to be
         # a file
         assert isinstance(self.absolute_path, str)
@@ -981,10 +996,7 @@ class FileUploadHandler(AuthorizedRequestHandler):
     async def post(self) -> None:
         if self.parse_failed:
             self._file.on_finish()
-            try:
-                os.remove(self._file.filename)
-            except Exception:
-                pass
+            self._remove_temp_file()
             raise tornado.web.HTTPError(500, "File Upload Parsing Failed")
         form_args = {}
         chk_target = self._targets.pop('checksum')
@@ -993,20 +1005,20 @@ class FileUploadHandler(AuthorizedRequestHandler):
             # Validate checksum
             recd_cksum = chk_target.value.decode().lower()
             if calc_chksum != recd_cksum:
-                # remove temporary file
-                try:
-                    os.remove(self._file.filename)
-                except Exception:
-                    pass
+                self._remove_temp_file()
                 raise tornado.web.HTTPError(
                     422,
                     f"File checksum mismatch: expected {recd_cksum}, "
                     f"calculated {calc_chksum}"
                 )
+        mp_fname: Optional[str] = self._file.multipart_filename
+        if mp_fname is None or not mp_fname.strip():
+            self._remove_temp_file()
+            raise tornado.web.HTTPError(400, "Multipart filename omitted")
         for name, target in self._targets.items():
             if target.value:
                 form_args[name] = target.value.decode()
-        form_args['filename'] = self._file.multipart_filename
+        form_args['filename'] = mp_fname
         form_args['tmp_file_path'] = self._file.filename
         debug_msg = "\nFile Upload Arguments:"
         for name, value in form_args.items():
@@ -1014,7 +1026,7 @@ class FileUploadHandler(AuthorizedRequestHandler):
         debug_msg += f"\nChecksum: {calc_chksum}"
         form_args["current_user"] = self.current_user
         logging.debug(debug_msg)
-        logging.info(f"Processing Uploaded File: {self._file.multipart_filename}")
+        logging.info(f"Processing Uploaded File: {mp_fname}")
         try:
             result = await self.file_manager.finalize_upload(form_args)
         except ServerError as e:
@@ -1041,6 +1053,12 @@ class FileUploadHandler(AuthorizedRequestHandler):
         self.set_status(201)
         self.set_header("Content-Type", "application/json; charset=UTF-8")
         self.finish(jsonw.dumps(result))
+
+    def _remove_temp_file(self) -> None:
+        try:
+            os.remove(self._file.filename)
+        except Exception:
+            pass
 
 # Default Handler for unregistered endpoints
 class AuthorizedErrorHandler(AuthorizedRequestHandler):

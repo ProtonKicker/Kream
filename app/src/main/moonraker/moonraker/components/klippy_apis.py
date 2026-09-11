@@ -133,7 +133,7 @@ class KlippyAPI(APITransport):
         # WARNING: Do not call this method from within the following
         # event handlers when "wait_klippy_started" is set to True:
         # klippy_identified, klippy_started, klippy_ready, klippy_disconnect
-        # Doing so will result in "wait_started" blocking for the specifed
+        # Doing so will result in "wait_started" blocking for the specified
         # timeout (default 20s) and returning False.
         # XXX - validate that file is on disk
         if filename[0] == '/':
@@ -178,7 +178,7 @@ class KlippyAPI(APITransport):
         # WARNING: Do not call this method from within the following
         # event handlers when "wait_klippy_started" is set to True:
         # klippy_identified, klippy_started, klippy_ready, klippy_disconnect
-        # Doing so will result in "wait_started" blocking for the specifed
+        # Doing so will result in "wait_started" blocking for the specified
         # timeout (default 20s) and returning False.
         if wait_klippy_started:
             await self.klippy.wait_started()
@@ -266,12 +266,15 @@ class KlippyAPI(APITransport):
         objects: Mapping[str, Optional[List[str]]],
         transport: APITransport,
         default: Union[Sentinel, _T] = Sentinel.MISSING,
+        full_response: bool = False
     ) -> Union[_T, Dict[str, Any]]:
         params = {"objects": dict(objects)}
         result = await self._send_klippy_request(
             SUBSCRIPTION_ENDPOINT, params, default, transport
         )
         if isinstance(result, dict) and "status" in result:
+            if full_response:
+                return result
             return result["status"]
         if default is not Sentinel.MISSING:
             return default

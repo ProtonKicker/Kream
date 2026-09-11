@@ -25,6 +25,13 @@ object BundleInstaller {
                 prefs.edit().putString("version", ver).apply()
             }
 
+            // Moonraker's file_manager registers "<klipper_path>/docs" as the
+            // "docs" root and adds a startup warning if it does not exist. We
+            // don't bundle Klipper's docs tree, so create the (empty) folder to
+            // silence "Supplied path (…/klipper/docs) for (docs) is invalid".
+            File(root, "klipper/docs").mkdirs()
+            File(root, "kalico/docs").mkdirs()
+
             val nativeDir = File(info.applicationInfo!!.nativeLibraryDir)
 
             patchBundledFile(root, assets, "klipper", "klippy/chelper/__init__.py") {

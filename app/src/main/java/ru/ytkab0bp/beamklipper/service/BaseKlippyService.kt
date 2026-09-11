@@ -20,7 +20,6 @@ import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.nio.charset.StandardCharsets
 import java.util.concurrent.atomic.AtomicBoolean
-import java.util.regex.Pattern
 
 open class BaseKlippyService(private val num: Int) : BasePythonService() {
     companion object {
@@ -149,21 +148,62 @@ open class BaseKlippyService(private val num: Int) : BasePythonService() {
                 }
             }
             try {
-                var changed = false
+                // [virtual_sdcard] is app-managed: its path must point at THIS
+                // instance's gcodes folder or Moonraker's file_manager throws
+                // "GCode path received from Klipper does not match expected
+                // location". Users paste configs with a stale path (old instance
+                // UUID, or /data/data vs /data/user/0), so on every start we
+                // strip whatever [virtual_sdcard] section is there and re-insert
+                // our own -- and we put it *before* Klipper's "#*# SAVE_CONFIG"
+                // autosave marker so Klipper's own SAVE_CONFIG doesn't drop it.
+                val wantPath = try {
+                    File(inst.publicDirectory, "gcodes").canonicalPath
+                } catch (_: Exception) {
+                    File(inst.publicDirectory, "gcodes").absolutePath
+                }
 
-                val pattern = Pattern.compile("\\[virtual_sdcard][\\r\\n ]+path: ([^\\r\\n]+)", Pattern.DOTALL)
-                val m = pattern.matcher(str)
-                if (m.find()) {
-                    val path = m.group(1)
-                    if (!path.startsWith(inst.publicDirectory.absolutePath)) {
-                        str = str.substring(0, m.start()) + str.substring(m.end() + 1)
+                // Drop any existing [virtual_sdcard] header plus its option lines
+                // (only ever "path:") and blank lines in between. Line-by-line so
+                // we never eat a following comment or another section.
+                val outLines = ArrayList<String>()
+                val lines = str.split("\n")
+                var i = 0
+                while (i < lines.size) {
+                    val line = lines[i]
+                    if (line.trim().equals("[virtual_sdcard]", ignoreCase = true)) {
+                        i++
+                        while (i < lines.size) {
+                            val t = lines[i].trim()
+                            val isOpt = t.isEmpty() ||
+                                t.startsWith("path", ignoreCase = true) ||
+                                lines[i].firstOrNull()?.isWhitespace() == true
+                            if (t.startsWith("[") || t.startsWith("#") || !isOpt) break
+                            i++
+                        }
+                        // trim trailing blank lines we accumulated before this
+                        while (outLines.isNotEmpty() && outLines.last().isBlank()) {
+                            outLines.removeAt(outLines.size - 1)
+                        }
+                        continue
                     }
+                    outLines.add(line)
+                    i++
                 }
-                if (!str.contains("[virtual_sdcard]")) {
-                    str += "\n[virtual_sdcard]\npath: " + File(inst.publicDirectory, "gcodes").absolutePath + "\n"
-                    changed = true
+                val stripped = outLines.joinToString("\n")
+
+                val block = "[virtual_sdcard]\npath: $wantPath\n"
+                // Klipper always writes its autosave block starting with a "#*#"
+                // line; keep [virtual_sdcard] above it so SAVE_CONFIG won't drop it.
+                val markerIdx = stripped.indexOf("#*#")
+                val rebuilt = if (markerIdx >= 0) {
+                    stripped.substring(0, markerIdx).trimEnd('\n', ' ', '\t') +
+                        "\n\n" + block + "\n\n" + stripped.substring(markerIdx)
+                } else {
+                    stripped.trimEnd('\n', ' ', '\t') + "\n\n" + block
                 }
-                if (changed) {
+
+                if (rebuilt != str) {
+                    str = rebuilt
                     FileOutputStream(printerCfg).use { fos ->
                         fos.write(str.toByteArray(StandardCharsets.UTF_8))
                     }
@@ -174,6 +214,25 @@ open class BaseKlippyService(private val num: Int) : BasePythonService() {
                     FileOutputStream(beeperCfg).use { fos ->
                         fos.write(BundleInstaller.readString(KlipperApp.INSTANCE.assets, "klipper/beam_beeper.cfg")
                             .toByteArray(StandardCharsets.UTF_8))
+                    }
+                }
+
+                // KAMP (Klipper Adaptive Meshing & Purging) — config-only, seeded
+                // once into <config>/KAMP/. Dormant until the user adds
+                // [include KAMP/KAMP_Settings.cfg] to printer.cfg. See docs/mods/.
+                val kampDir = File(config, "KAMP")
+                if (!kampDir.exists()) {
+                    kampDir.mkdirs()
+                    for (name in arrayOf("KAMP_Settings.cfg", "Adaptive_Meshing.cfg",
+                            "Line_Purge.cfg", "Voron_Purge.cfg", "Smart_Park.cfg")) {
+                        try {
+                            FileOutputStream(File(kampDir, name)).use { fos ->
+                                fos.write(BundleInstaller.readString(KlipperApp.INSTANCE.assets,
+                                    "klipper/kamp/$name").toByteArray(StandardCharsets.UTF_8))
+                            }
+                        } catch (e: Exception) {
+                            Log.w("klippy_$num", "Failed to seed KAMP/$name", e)
+                        }
                     }
                 }
             } catch (e: Exception) {
