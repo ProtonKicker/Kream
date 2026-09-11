@@ -22,12 +22,12 @@ The entire application has been migrated from Java to Kotlin, bringing:
 - **Smart casts & exhaustiveness checks** — bugs caught at compile time, not runtime
 
 ### 2. Dramatically Smaller Size
-Kocoa Beam is significantly smaller than the original Beam Klipper (138 MB → ~36 MB):
+Kocoa Beam is significantly smaller than the original Beam Klipper:
 
 | Component | Beam Klipper | Kocoa Beam |
 |-----------|-------------|------------|
 | FFmpeg timelapse | Bundled binary (~40 MB) | Android MediaCodec API (built-in) |
-| App size (arm64) | ~138 MB | ~36 MB |
+| App size | ~138 MB (arm64) | ~64 MB (arm64 / armv7), ~71 MB (x86_64) |
 
 The FFmpeg timelapse component was replaced with Android's native MediaCodec API, saving ~40 MB per architecture.
 
@@ -46,28 +46,47 @@ Kocoa Beam features a complete UI redesign with:
 
 ## Choosing the Right Package
 
-Kocoa Beam provides two APK variants:
+Kocoa Beam provides three APK variants:
 
 | Architecture | Package Name | Use Case |
 |-------------|--------------|----------|
 | arm64 | `KocoaBeam_*_arm64.apk` | Modern 64-bit devices (recommended) |
 | armv7 | `KocoaBeam_*_armv7.apk` | Older 32-bit devices |
+| x86_64 | `KocoaBeam_*_amd64.apk` | x86_64 tablets, Chromebooks, Android emulators |
 
 **How to check your device architecture:**
 - **Settings > About Phone > Architecture** or **Kernel Architecture**
 - Or install a CPU info app like "CPU-Z" or "AIDA64"
 - If unsure, try arm64 first — most devices released after 2015 support it
 
+## What this project changes
+
+This project keeps the bundled Klipper / Moonraker / Fluidd / Mainsail / Happy
+Hare current and adds on-device diagnostics, opt-in Klipper add-ons and firmware
+tooling. Details:
+
+- [`docs/whats-new.md`](docs/whats-new.md) — full list of changes
+- [`docs/build-firmware.md`](docs/build-firmware.md) — build MCU firmware for any board
+- [`docs/mods/klipper-addons.md`](docs/mods/klipper-addons.md) — the bundled add-ons
+- [`docs/mods/input-shaper-manual.md`](docs/mods/input-shaper-manual.md) — input shaper without an accelerometer
+- [`docs/`](docs/index.md) — documentation index
+
 # Quick Start
 
-1. Download & install firmware.bin from [here](https://github.com/utkabobr/klipper/tree/prebuilt-v0.12.0) (or build your own from [this repo](https://github.com/utkabobr/klipper) to ensure versions compatibility)
-2. Install APK from [Releases tab](https://github.com/ProtonKicker/Cream/releases/latest)
-3. Allow all the permissions required
-4. Add printer instance (Click generic-***.cfg if your printer is not available)
-5. Click start
-6. Go to web server's url `http://IP:8888/`
-7. Configure serial port from "Devices" tab in web editor (1.0.1+ configures automatically if you use single printer setup)
-8. You're awesome!
+1. **MCU firmware** — flash the printer's mainboard, using either:
+   - a pre-built image from the [Beam Klipper firmware list](https://github.com/utkabobr/klipper/releases)
+     (the `prebuilt-v0.12.0` set covers many boards), **or**
+   - a fresh Klipper 0.13 build — one command via
+     [`docs/build-firmware.md`](docs/build-firmware.md) (Docker or a local script,
+     for any supported board).
+
+   Klipper 0.13 is recommended; older pre-built images also work.
+2. Install the APK for your CPU from the [Releases tab](https://github.com/ProtonKicker/Cream/releases/latest).
+3. Grant the requested permissions.
+4. Add a printer instance (choose a `generic-*.cfg` if your printer is not listed).
+5. Start the instance.
+6. Open the web UI: Fluidd `http://IP:4408/` or Mainsail `http://IP:4409/` — the
+   active URL is shown on the main screen. The serial port is auto-detected.
 
 # Can I use device as regular after I install Kocoa Beam to it?
 
@@ -77,11 +96,13 @@ Kocoa Beam does not do **anything** to your Android system, it runs in user-spac
 
 # What's IP:port?
 
-It's displayed on main page when any of the instances are running.
+It's displayed on the main page when any instance is running. Each front end has
+its own port, following the front-end toggle on the main screen:
 
-Web server URL is: `http://IP:8888/`
+- Fluidd => `http://IP:4408/`
+- Mainsail => `http://IP:4409/`
 
-Camera URL's are:
+Camera URLs:
 - /webcam/?action=stream => `http://IP:8889/`
 - /webcam/?action=snapshot => `http://IP:8889/snapshot`
 
@@ -98,6 +119,20 @@ Kocoa Beam bundles:
 - [Happy Hare](https://github.com/moggieuk/Happy-Hare)
 - [Klipper TMC Autotune](https://github.com/andrewmcgr/klipper_tmc_autotune)
 - [Moonraker-timelapse](https://github.com/mainsail-crew/moonraker-timelapse)
+
+## Updates
+
+Bundled component versions in this project:
+
+| Component | Version |
+|---|---|
+| Klipper / Kalico | current upstream (MCU firmware target: 0.13) |
+| Moonraker | 0.11.0 |
+| Fluidd | 1.37.5 |
+| Mainsail | 2.19.0 |
+| Happy Hare | v4.0.0 |
+
+Opt-in Klipper add-ons are also bundled (KAMP, LED Effect, Z Calibration, Auto Speed, TMC Autotune) — see [`docs/mods/klipper-addons.md`](docs/mods/klipper-addons.md). Full change list: [`docs/whats-new.md`](docs/whats-new.md).
 
 # Android Extensions
 
@@ -146,8 +181,12 @@ I'm using UGREEN Type-c hub (Not affiliated, but I'm waiting for your request UG
 
 # Building
 
-- Fetch all of the submodules first! (`git clone --recursive`, do NOT download project as archive)
-- Import project into Android Studio & click run
+One-shot setup (installs the pinned SDK / NDK / CMake, a Python 3.10 for Chaquopy, and writes `local.properties`):
+
+- Linux / macOS: `./scripts/setup.sh`
+- Windows: `.\scripts\setup.ps1`
+
+Then `./gradlew :app:assembleArm64Debug`, or open the project in Android Studio and Run. Details, manual steps and signing: [`docs/build-app.md`](docs/build-app.md).
 
 # Contributing
 
