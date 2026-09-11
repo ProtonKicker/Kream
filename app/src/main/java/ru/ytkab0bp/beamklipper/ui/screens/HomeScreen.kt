@@ -465,12 +465,12 @@ private fun openWebFrontend(context: Context) {
     val i = wm.connectionInfo.ipAddress
     val ip = if (i == 0 || !KlipperInstance.isWebServerRunning()) "127.0.0.1" else Formatter.formatIpAddress(i)
     val t = System.currentTimeMillis()
-    val intent = Intent(Intent.ACTION_VIEW, Uri.parse("http://$ip:${WebService.PORT}/?t=$t"))
+    val intent = Intent(Intent.ACTION_VIEW, Uri.parse("http://$ip:${WebService.getPort()}/?t=$t"))
         .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
     context.startActivity(intent)
 }
 
 private fun webIpInfo(context: Context): String {
     val wm = context.getSystemService(Context.WIFI_SERVICE) as WifiManager
-    return context.getString(R.string.IPInfo, Formatter.formatIpAddress(wm.connectionInfo.ipAddress), WebService.PORT)
+    return context.getString(R.string.IPInfo, Formatter.formatIpAddress(wm.connectionInfo.ipAddress), WebService.getPort())
 }

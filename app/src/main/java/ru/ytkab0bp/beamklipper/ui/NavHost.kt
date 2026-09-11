@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.width
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -32,11 +33,13 @@ import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import ru.ytkab0bp.beamklipper.R
 import ru.ytkab0bp.beamklipper.ui.screens.ConfigScreen
 import ru.ytkab0bp.beamklipper.ui.screens.HomeScreen
+import ru.ytkab0bp.beamklipper.ui.screens.LogsScreen
 import ru.ytkab0bp.beamklipper.ui.state.MainViewModel
 import ru.ytkab0bp.beamklipper.ui.theme.Accent
 import ru.ytkab0bp.beamklipper.ui.theme.Ink
@@ -44,6 +47,7 @@ import ru.ytkab0bp.beamklipper.ui.theme.Paper
 
 const val NAV_HOME = 0
 const val NAV_CONFIG = 1
+const val NAV_LOGS = 2
 
 @Composable
 fun NavHost(
@@ -54,7 +58,7 @@ fun NavHost(
     val statusInsets = WindowInsets.statusBars.asPaddingValues()
     val navBarInsets = WindowInsets.navigationBars.asPaddingValues()
 
-    BackHandler(enabled = nav == NAV_CONFIG) {
+    BackHandler(enabled = nav != NAV_HOME) {
         nav = NAV_HOME
     }
 
@@ -75,8 +79,12 @@ fun NavHost(
                 text = stringResource(R.string.AppName),
                 style = MaterialTheme.typography.headlineLarge.copy(fontSize = 32.sp),
                 color = Ink,
-                textAlign = TextAlign.Center
+                textAlign = TextAlign.Center,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f, fill = false)
             )
+            Spacer(Modifier.width(8.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 NavTabButton(
                     active = nav == NAV_HOME,
@@ -84,11 +92,16 @@ fun NavHost(
                     onClick = { nav = NAV_HOME }
                 )
                 NavTabButton(
+                    active = nav == NAV_LOGS,
+                    icon = R.drawable.ic_inbox_outline_28,
+                    onClick = { nav = NAV_LOGS }
+                )
+                NavTabButton(
                     active = nav == NAV_CONFIG,
                     icon = R.drawable.ic_settings_outline_28,
                     onClick = { nav = NAV_CONFIG }
                 )
-            }
+}
         }
 
         Box(
@@ -100,6 +113,7 @@ fun NavHost(
         ) {
             when (nav) {
                 NAV_CONFIG -> ConfigScreen()
+                NAV_LOGS -> LogsScreen()
                 else -> HomeScreen(
                     isCurrentLauncher = isCurrentLauncher,
                     mainViewModel = mainViewModel
