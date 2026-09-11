@@ -161,7 +161,12 @@ class AutoSpeed:
 
     cmd_AUTO_SPEED_help = ("Automatically find your printer's maximum acceleration/velocity")
     def cmd_AUTO_SPEED(self, gcmd):
-        if not len(self.steppers.keys()) == 3:
+        # X/Y are the only axes actually driven for cartesian/corexy testing; Z
+        # is only needed by _prepare()'s leveling move, which has its own guard.
+        # A probe:z_virtual_endstop Z axis never fires homing:home_rails_end
+        # (see homing.py home_rails -> _do_home_z_via_probe), so requiring 3
+        # here would always fail on the (very common) probe-Z setup. [Beam patch]
+        if 'x' not in self.steppers or 'y' not in self.steppers:
             raise gcmd.error(f"Printer must be homed first! Found {len(self.steppers.keys())} homed axes.")
 
         validate = gcmd.get_int('VALIDATE', 0, minval=0, maxval=1)
@@ -199,7 +204,8 @@ class AutoSpeed:
 
     cmd_AUTO_SPEED_ACCEL_help = ("Automatically find your printer's maximum acceleration")
     def cmd_AUTO_SPEED_ACCEL(self, gcmd):
-        if not len(self.steppers.keys()) == 3:
+        # See cmd_AUTO_SPEED for why this only requires x/y. [Beam patch]
+        if 'x' not in self.steppers or 'y' not in self.steppers:
             raise gcmd.error(f"Printer must be homed first! Found {len(self.steppers.keys())} homed axes.")
         axes = self._parse_axis(gcmd.get("AXIS", self._axis_to_str(self.axes)))
 
@@ -255,7 +261,8 @@ class AutoSpeed:
 
     cmd_AUTO_SPEED_VELOCITY_help = ("Automatically find your printer's maximum velocity")
     def cmd_AUTO_SPEED_VELOCITY(self, gcmd):
-        if not len(self.steppers.keys()) == 3:
+        # See cmd_AUTO_SPEED for why this only requires x/y. [Beam patch]
+        if 'x' not in self.steppers or 'y' not in self.steppers:
             raise gcmd.error(f"Printer must be homed first! Found {len(self.steppers.keys())} homed axes.")
         axes = self._parse_axis(gcmd.get("AXIS", self._axis_to_str(self.axes)))
 
@@ -311,7 +318,8 @@ class AutoSpeed:
 
     cmd_AUTO_SPEED_VALIDATE_help = ("Validate your printer's acceleration/velocity don't miss steps")
     def cmd_AUTO_SPEED_VALIDATE(self, gcmd):
-        if not len(self.steppers.keys()) == 3:
+        # See cmd_AUTO_SPEED for why this only requires x/y. [Beam patch]
+        if 'x' not in self.steppers or 'y' not in self.steppers:
             raise gcmd.error(f"Printer must be homed first! Found {len(self.steppers.keys())} homed axes.")
 
         max_missed   = gcmd.get_float('MAX_MISSED', self.max_missed, above=0.0)
@@ -340,7 +348,8 @@ class AutoSpeed:
     cmd_AUTO_SPEED_GRAPH_help = ("Graph your printer's maximum acceleration at given velocities")
     def cmd_AUTO_SPEED_GRAPH(self, gcmd):
         import matplotlib.pyplot as plt # this may fail if matplotlib isn't installed
-        if not len(self.steppers.keys()) == 3:
+        # See cmd_AUTO_SPEED for why this only requires x/y. [Beam patch]
+        if 'x' not in self.steppers or 'y' not in self.steppers:
             raise gcmd.error(f"Printer must be homed first! Found {len(self.steppers.keys())} homed axes.")
         axes = self._parse_axis(gcmd.get("AXIS", self._axis_to_str(self.axes)))
 
@@ -787,7 +796,8 @@ class AutoSpeed:
 
     def cmd_X_ENDSTOP_ACCURACY(self, gcmd):
 
-        if not len(self.steppers.keys()) == 3:
+        # Only needs x; see cmd_AUTO_SPEED for why the check drops z. [Beam patch]
+        if 'x' not in self.steppers:
             raise gcmd.error(f"Printer must be homed first! Found {len(self.steppers.keys())} homed axes.")
 
         # Number of samples for accuracy check
@@ -840,7 +850,8 @@ class AutoSpeed:
 
     def cmd_Y_ENDSTOP_ACCURACY(self, gcmd):
 
-        if not len(self.steppers.keys()) == 3:
+        # Only needs y; see cmd_AUTO_SPEED for why the check drops z. [Beam patch]
+        if 'y' not in self.steppers:
             raise gcmd.error(f"Printer must be homed first! Found {len(self.steppers.keys())} homed axes.")
 
         # Number of samples for accuracy check
