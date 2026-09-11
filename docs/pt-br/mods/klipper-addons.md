@@ -126,9 +126,11 @@ home). Sem acelerômetro.
 
 ```ini
 [auto_speed]
-z: 50                 # altura de Z pra rodar o teste
 margin: 20            # margem de segurança dos limites dos eixos
 ```
+
+`z` não é opção de config — é parâmetro do comando `AUTO_SPEED` (`AUTO_SPEED Z=50`),
+caso você queira mover pra uma altura Z específica antes do teste.
 
 Rode `AUTO_SPEED` (varredura completa, ~vários minutos) ou `AUTO_SPEED_VELOCITY` /
 `AUTO_SPEED_ACCEL`. Ele imprime os `max_velocity` / `max_accel` recomendados. O

@@ -104,9 +104,11 @@ start_gcode:          <部署探针的宏，如果是可停靠式>
 
 ```ini
 [auto_speed]
-z: 50                 # 运行测试的 Z 高度
 margin: 20            # 距轴限位的安全边距
 ```
+
+`z` 不是配置项，而是 `AUTO_SPEED` 命令本身的参数（`AUTO_SPEED Z=50`），
+如果你想先移动到指定 Z 高度再测试可以这样用。
 
 运行 `AUTO_SPEED`（完整扫描，约几分钟）或 `AUTO_SPEED_VELOCITY` / `AUTO_SPEED_ACCEL`。它会打印推荐的 `max_velocity` / `max_accel`。可选的方差图需要 `matplotlib`（未安装）—— 数值结果不需要。文档：<https://github.com/Anonoei/klipper_auto_speed>
 

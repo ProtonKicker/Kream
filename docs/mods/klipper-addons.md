@@ -123,9 +123,11 @@ home). No accelerometer.
 
 ```ini
 [auto_speed]
-z: 50                 # Z height to run the test at
 margin: 20            # keep-out margin from the axis limits
 ```
+
+`z` is not a config option — it's a param on the `AUTO_SPEED` gcode command
+itself (`AUTO_SPEED Z=50`), if you want it to move to a given Z height first.
 
 Run `AUTO_SPEED` (full sweep, ~several minutes) or `AUTO_SPEED_VELOCITY` /
 `AUTO_SPEED_ACCEL`. It prints recommended `max_velocity` / `max_accel`. The
