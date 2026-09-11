@@ -51,8 +51,8 @@ if TYPE_CHECKING:
     from .announcements import Announcements
     from .proc_stats import ProcStats
     from .dbus_manager import DbusManager
-    from dbus_next.aio.proxy_object import ProxyInterface
-    from dbus_next.signature import Variant
+    from dbus_fast.aio.proxy_object import ProxyInterface
+    from dbus_fast.signature import Variant
     SudoReturn = Union[Awaitable[Tuple[str, bool]], Tuple[str, bool]]
     SudoCallback = Callable[[], SudoReturn]
 
@@ -74,6 +74,7 @@ SERVICE_PROPERTIES = [
     "User"
 ]
 USB_IDS_URL = "http://www.linux-usb.org/usb.ids"
+HAS_SYSCTL = shutil.which("systemctl", os.F_OK) is not None
 
 class Machine:
     def __init__(self, config: ConfigHelper) -> None:
@@ -84,11 +85,7 @@ class Machine:
         dist_info = {'name': distro.name(pretty=True)}
         dist_info.update(distro.info())
         dist_info['release_info'] = distro.distro_release_info()
-        try:
-            dist_info['kernel_version'] = platform.release()
-        except Exception:
-            dist_info['kernel_version'] = "Unknown"
-
+        dist_info['kernel_version'] = platform.release()
         self.inside_container = False
         self.moonraker_service_info: Dict[str, Any] = {}
         self.sudo_req_lock = asyncio.Lock()
@@ -182,6 +179,8 @@ class Machine:
         # Beam changed: No permission on some devices
         iwgetbin = "iwgetid"
         self.iwgetid_cmd = shell_cmd.build_shell_command(iwgetbin)
+        # Beam changed: set once `ip -json -det address` proves unusable
+        self._net_iface_cmd_broken = False
         self.init_evt = asyncio.Event()
         self.libcam = self._try_import_libcamera()
 
@@ -233,7 +232,7 @@ class Machine:
             if self.server.is_verbose_enabled():
                 logging.exception("Failed to import libcamera")
             self.server.add_log_rollover_item(
-                "libcamera", "Module libcamera unavailble, import failed"
+                "libcamera", "Module libcamera unavailable, import failed"
             )
             return None
 
@@ -577,19 +576,10 @@ class Machine:
     def _get_cpu_info(self) -> Dict[str, Any]:
         cpu_file = pathlib.Path("/proc/cpuinfo")
         mem_file = pathlib.Path("/proc/meminfo")
-        processor = ""
-        bits = ""
-        try:
-            bits = platform.architecture()[0]
-            processor = platform.processor() or platform.machine()
-        except Exception:
-            bits = "Unknown"
-            processor = "Unknown"
-
         cpu_info = {
             'cpu_count': os.cpu_count(),
-            'bits': bits,
-            'processor': processor,
+            'bits': platform.architecture()[0],
+            'processor': platform.processor() or platform.machine(),
             'cpu_desc': "",
             'serial_number': "",
             'hardware_desc': "",
@@ -635,8 +625,8 @@ class Machine:
     def _check_inside_container(self) -> Dict[str, Any]:
         cgroup_file = pathlib.Path(CGROUP_PATH)
         virt_type = virt_id = "none"
-        try:
-            if cgroup_file.exists():
+        if cgroup_file.exists():
+            try:
                 data = cgroup_file.read_text()
                 container_types = ["docker", "lxc"]
                 for ct in container_types:
@@ -648,8 +638,8 @@ class Machine:
                             f"Container detected via cgroup: {ct}"
                         )
                         break
-        except Exception:
-            logging.exception(f"Error reading {CGROUP_PATH}")
+            except Exception:
+                logging.exception(f"Error reading {CGROUP_PATH}")
 
         # Fall back to process schedule check
         if not self.inside_container:
@@ -681,7 +671,12 @@ class Machine:
                                         sequence: int,
                                         notify: bool = True
                                         ) -> None:
-        if sequence % NETWORK_UPDATE_SEQUENCE or True:
+        if sequence % NETWORK_UPDATE_SEQUENCE:
+            return
+        # Beam changed: Android's toybox `ip` has no `-json`/`-det` support, so
+        # this command can never succeed on-device. After the first failure we
+        # stop retrying (and stop spamming the log with tracebacks every 10s).
+        if getattr(self, "_net_iface_cmd_broken", False):
             return
         network: Dict[str, Any] = {}
         canbus: Dict[str, Any] = {}
@@ -724,7 +719,14 @@ class Machine:
                         'ip_addresses': addresses
                     }
         except Exception:
-            logging.exception("Error processing network update")
+            # Beam changed: log the failure once, then disable the poller. On
+            # Android `ip -json -det address` is unsupported; retrying it every
+            # 10s just floods moonraker.log with identical tracebacks.
+            self._net_iface_cmd_broken = True
+            logging.warning(
+                "Network interface monitoring disabled: 'ip -json -det "
+                "address' is not supported on this platform"
+            )
             return
         prev_network = self.system_info.get('network', {})
         if network != prev_network:
@@ -870,7 +872,7 @@ class Machine:
             if resp.etag is not None:
                 usb_id_req_info["etag"] = resp.etag
             if resp.last_modified is not None:
-                usb_id_req_info["last_modifed"] = resp.last_modified
+                usb_id_req_info["last_modified"] = resp.last_modified
             await db.insert_item("moonraker", "usb_id_req_info", usb_id_req_info)
             # Write file
             logging.info("Writing usb.ids file...")
@@ -949,17 +951,12 @@ class Machine:
 class BaseProvider:
     def __init__(self, config: ConfigHelper) -> None:
         self.server = config.get_server()
-        self.shutdown_action = config.get("shutdown_action", "poweroff")
-        self.shutdown_action = self.shutdown_action.lower()
-        if self.shutdown_action not in ["halt", "poweroff"]:
-            raise config.error(
-                "Section [machine], Option 'shutdown_action':"
-                f"Invalid value '{self.shutdown_action}', must be "
-                "'halt' or 'poweroff'"
-            )
+        shutdown_choices = ["halt", "poweroff"]
+        self.shutdown_action = config.getchoice(
+            "shutdown_action", shutdown_choices, "poweroff", force_lowercase=True
+        )
         self.available_services: Dict[str, Dict[str, str]] = {}
-        self.shell_cmd: SCMDComp = self.server.load_component(
-            config, 'shell_command')
+        self.shell_cmd: SCMDComp = self.server.load_component(config, 'shell_command')
 
     async def initialize(self) -> None:
         pass
@@ -969,10 +966,13 @@ class BaseProvider:
         return await machine.exec_sudo_command(command)
 
     async def shutdown(self) -> None:
-        await self._exec_sudo_command(f"systemctl {self.shutdown_action}")
+        act = self.shutdown_action
+        cmd = f"systemctl {act}" if HAS_SYSCTL else act
+        await self._exec_sudo_command(cmd)
 
     async def reboot(self) -> None:
-        await self._exec_sudo_command("systemctl reboot")
+        cmd = "systemctl reboot" if HAS_SYSCTL else "reboot"
+        await self._exec_sudo_command(cmd)
 
     async def do_service_action(self,
                                 action: str,
@@ -1212,7 +1212,7 @@ class SystemdDbusProvider(BaseProvider):
                 "sessions are open."
             )
         try:
-            # Get the login manaager interface
+            # Get the login manager interface
             self.login_mgr = await self.dbus_mgr.get_interface(
                 "org.freedesktop.login1",
                 "/org/freedesktop/login1",
@@ -1729,8 +1729,7 @@ class InstallValidator:
         except Exception as e:
             has_error = True
             msg = f"Failed to validate {name}: {e}"
-            logging.exception(msg)
-            self.server.add_warning(msg, log=False)
+            self.server.add_warning(msg, exc_info=e)
             fm.disable_write_access()
         else:
             self.validation_enabled = False
@@ -1824,7 +1823,7 @@ class InstallValidator:
             raise ValidationError(
                 "Moonraker requires sudo permission to update the system "
                 "service. Please check your notifications for further "
-                "intructions."
+                "instructions."
             )
         self._sudo_requested = False
         svc_dest = pathlib.Path(props["FragmentPath"])

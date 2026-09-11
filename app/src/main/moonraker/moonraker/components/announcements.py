@@ -40,10 +40,16 @@ class Announcements:
             self._handle_update_timer
         )
         self.request_lock = asyncio.Lock()
+        self.moonlight_enabled = config.getboolean("enable_moonlight", True)
+        if not self.moonlight_enabled:
+            self.server.add_log_rollover_item(
+                "moonlight_disabled",
+                "Moonlight Disabled, remote announcement feeds unavailable"
+            )
         self.dev_mode = config.getboolean("dev_mode", False)
         self.subscriptions: Dict[str, RssFeed] = {
-            "moonraker": RssFeed("moonraker", self.entry_mgr, self.dev_mode),
-            "klipper": RssFeed("klipper", self.entry_mgr, self.dev_mode)
+            "moonraker": RssFeed("moonraker", self),
+            "klipper": RssFeed("klipper", self)
         }
         self.stored_feeds: List[str] = []
         sub_list: List[str] = config.getlist("subscriptions", [])
@@ -53,9 +59,7 @@ class Announcements:
             if sub in self.subscriptions:
                 continue
             self.configured_feeds.append(sub)
-            self.subscriptions[sub] = RssFeed(
-                sub, self.entry_mgr, self.dev_mode
-            )
+            self.subscriptions[sub] = RssFeed(sub, self)
 
         self.server.register_endpoint(
             "/server/announcements/list", RequestType.GET,
@@ -96,7 +100,7 @@ class Announcements:
         for name in stored_feeds:
             if name in self.subscriptions:
                 continue
-            feed = RssFeed(name, self.entry_mgr, self.dev_mode)
+            feed = RssFeed(name, self)
             self.subscriptions[name] = feed
         async with self.request_lock:
             await self.entry_mgr.initialize()
@@ -179,7 +183,7 @@ class Announcements:
         result = "skipped"
         if req_type == RequestType.POST:
             if name not in self.subscriptions:
-                feed = RssFeed(name, self.entry_mgr, self.dev_mode)
+                feed = RssFeed(name, self)
                 self.subscriptions[name] = feed
                 await feed.initialize()
                 changed = await feed.update_entries()
@@ -269,7 +273,7 @@ class Announcements:
             return
         logging.info(f"Registering feed {name}")
         self.configured_feeds.append(name)
-        self.subscriptions[name] = RssFeed(name, self.entry_mgr, self.dev_mode)
+        self.subscriptions[name] = RssFeed(name, self)
 
     def close(self):
         self.entry_mgr.close()
@@ -407,12 +411,10 @@ class EntryManager:
             handle.cancel()
 
 class RssFeed:
-    def __init__(
-        self, name: str, entry_mgr: EntryManager, dev_mode: bool
-    ) -> None:
-        self.server = entry_mgr.server
+    def __init__(self, name: str, announcement_mgr: Announcements) -> None:
+        self.server = announcement_mgr.server
+        self.announcements = announcement_mgr
         self.name = name
-        self.entry_mgr = entry_mgr
         self.client: HttpClient = self.server.lookup_component("http_client")
         self.database: MoonrakerDatabase
         self.database = self.server.lookup_component("database")
@@ -421,10 +423,14 @@ class RssFeed:
         self.last_modified: int = 0
         self.etag: Optional[str] = None
         self.dev_xml_path: Optional[pathlib.Path] = None
-        if dev_mode:
-            res_dir = pathlib.Path(__file__).parent.parent.parent.resolve()
-            res_path = res_dir.joinpath(".devel/announcement_xml")
-            self.dev_xml_path = res_path.joinpath(self.xml_file)
+        if announcement_mgr.dev_mode:
+            data_path = pathlib.Path(self.server.get_app_arg("data_path"))
+            dev_folder = data_path.joinpath("development/announcements")
+            dev_folder.mkdir(parents=True, exist_ok=True)
+            self.dev_xml_path = dev_folder.joinpath(self.xml_file)
+            logging.info(
+                f"Announcement Feed {name}: Dev XML path set to {self.dev_xml_path}"
+            )
 
     async def initialize(self) -> None:
         self.etag = await self.database.get_item(
@@ -441,6 +447,8 @@ class RssFeed:
         return self._parse_xml(xml_data)
 
     async def _fetch_moonlight(self) -> str:
+        if not self.announcements.moonlight_enabled:
+            return ""
         headers = {"Accept": "application/xml"}
         if self.etag is not None:
             headers["If-None-Match"] = self.etag
@@ -492,6 +500,7 @@ class RssFeed:
         return xml_data
 
     def _parse_xml(self, xml_data: str) -> bool:
+        entry_mgr = self.announcements.entry_mgr
         root = etree.fromstring(xml_data)
         channel = root.find("channel")
         if channel is None:
@@ -519,7 +528,7 @@ class RssFeed:
                     f"Feed {self.name}: Guid {guid} is not "
                     f"prefixed with {prefix}")
             valid_ids.append(guid)
-            if self.entry_mgr.has_entry(guid):
+            if entry_mgr.has_entry(guid):
                 continue
             try:
                 rfc_date = item.findtext("pubDate", "")
@@ -540,10 +549,10 @@ class RssFeed:
                 "feed": self.name
             }
             changed = True
-            self.entry_mgr.add_entry(entry)
+            entry_mgr.add_entry(entry)
         logging.debug(f"Feed {self.name}: found entries {valid_ids}")
         if prefix:
-            pruned = self.entry_mgr.prune_by_prefix(prefix, valid_ids)
+            pruned = entry_mgr.prune_by_prefix(prefix, valid_ids)
             changed = changed or pruned
         return changed
 

@@ -14,8 +14,9 @@ import dataclasses
 import time
 from enum import Enum, Flag, auto
 from abc import ABCMeta, abstractmethod
-from .utils import ServerError, Sentinel
+from .utils import Sentinel
 from .utils import json_wrapper as jsonw
+from .utils.exceptions import ServerError, AgentError
 
 # Annotation imports
 from typing import (
@@ -424,12 +425,22 @@ class BaseRemoteConnection(APITransport):
         auth: AuthComp = self.server.lookup_component("authorization", None)
         if auth is None:
             return
-        if token is not None:
-            self.user_info = auth.validate_jwt(token)
-        elif api_key is not None and self.user_info is None:
-            self.user_info = auth.validate_api_key(api_key)
-        elif self._need_auth:
-            raise self.server.error("Unauthorized", 401)
+        try:
+            if token is not None:
+                self.user_info = auth.validate_jwt(token)
+            elif api_key is not None:
+                self.user_info = auth.validate_api_key(api_key)
+            elif self._need_auth:
+                raise self.server.error("Unauthorized", 401)
+        except self.server.error:
+            if self._user_info is not None:
+                logging.info(
+                    f"Connection {self._uid}: Trusted Client attempt at user/api-key "
+                    "authentication failed.  Revoking trusted authentication."
+                )
+            self._user_info = None
+            self._need_auth = True
+            raise
 
     def check_authenticated(self, api_def: APIDefinition) -> None:
         if not self._need_auth:
@@ -588,7 +599,7 @@ class WebRequest:
         except Exception:
             raise ServerError(
                 f"Unable to convert argument [{key}] to {dtype}: "
-                f"value recieved: {val}")
+                f"value received: {val}")
 
     def get(self,
             key: str,
@@ -818,14 +829,8 @@ class JsonRPC:
         result = obj.get("result")
         if result is None:
             name = conn.client_data["name"]
-            error = obj.get("error")
-            msg = f"Invalid Response: {obj}"
-            code = -32600
-            if isinstance(error, dict):
-                msg = error.get("message", msg)
-                code = error.get("code", code)
-            msg = f"{name} rpc error: {code} {msg}"
-            ret = ServerError(msg, 418)
+            msg = f"Agent {name} RPC error"
+            ret = AgentError(msg, obj.get("error"))
         else:
             ret = result
         conn.resolve_pending_response(response_id, ret)
@@ -846,7 +851,7 @@ class JsonRPC:
             )
         except TypeError as e:
             return self.build_error(
-                -32602, f"Invalid params:\n{e}", req_id, True, method_name
+                -32602, f"Invalid params:\n{e}", req_id, e, method_name
             )
         except ServerError as e:
             code = e.status_code
@@ -854,9 +859,9 @@ class JsonRPC:
                 code = -32601
             elif code == 401:
                 code = -32602
-            return self.build_error(code, str(e), req_id, True, method_name)
+            return self.build_error(code, str(e), req_id, e, method_name)
         except Exception as e:
-            return self.build_error(-31000, str(e), req_id, True, method_name)
+            return self.build_error(500, str(e), req_id, e, method_name)
 
         if req_id is None:
             return None
@@ -875,24 +880,26 @@ class JsonRPC:
         code: int,
         msg: str,
         req_id: Optional[int] = None,
-        is_exc: bool = False,
+        exc: Exception | None = None,
         method_name: str = ""
     ) -> Dict[str, Any]:
         if method_name:
             method_name = f"Requested Method: {method_name}, "
         log_msg = f"JSON-RPC Request Error - {method_name}Code: {code}, Message: {msg}"
-        if is_exc and self.verbose:
-            logging.exception(log_msg)
-        else:
-            logging.info(log_msg)
+        err = {'code': code, 'message': msg}
+        if isinstance(exc, AgentError):
+            err["data"] = exc.error_data
+            if self.verbose:
+                log_msg += f"\nExtra data: {exc.error_data}"
+        logging.info(log_msg, exc_info=(exc is not None and self.verbose))
         return {
             'jsonrpc': "2.0",
-            'error': {'code': code, 'message': msg},
+            'error': err,
             'id': req_id
         }
 
 
-# *** Job History Common Clases ***
+# *** Job History Common Classes ***
 
 class FieldTracker(Generic[_T]):
     history: History = None  # type: ignore

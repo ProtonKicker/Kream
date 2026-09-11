@@ -19,15 +19,21 @@ def commit = getGitCommitHash(file('.'))
 
 def keystorePropertiesFile = rootProject.file('local.properties')
 def keystoreProperties = new Properties()
-keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
+if (keystorePropertiesFile.exists()) {
+    keystorePropertiesFile.withInputStream { keystoreProperties.load(it) }
+}
+def hasReleaseKeystore = keystoreProperties['key.store'] != null &&
+        file(keystoreProperties['key.store']).exists()
 
 android {
     signingConfigs {
-        release {
-            storeFile file(keystoreProperties['key.store'])
-            storePassword keystoreProperties['key.store.password']
-            keyAlias keystoreProperties['key.alias']
-            keyPassword keystoreProperties['key.key.password']
+        if (hasReleaseKeystore) {
+            release {
+                storeFile file(keystoreProperties['key.store'])
+                storePassword keystoreProperties['key.store.password']
+                keyAlias keystoreProperties['key.alias']
+                keyPassword keystoreProperties['key.key.password']
+            }
         }
     }
     namespace 'ru.ytkab0bp.beamklipper'
@@ -49,7 +55,11 @@ android {
 
         python {
             version = "3.10"
-            buildPython "/home/tovi/.local/share/uv/python/cpython-3.10.20-linux-x86_64-gnu/bin/python3.10"
+            def configuredBuildPython = keystoreProperties['chaquopy.python'] ?:
+                    System.getenv('CHAQUOPY_PYTHON')
+            if (configuredBuildPython != null && !configuredBuildPython.trim().isEmpty()) {
+                buildPython configuredBuildPython.trim()
+            }
             pip {
                 options("--find-links", "file://" + project.projectDir.toString() + "/python_wheels")
 
@@ -60,20 +70,31 @@ android {
                 install "markupsafe==2.1.5"
                 install "tornado==6.4.0"
                 install "pyserial-asyncio==0.6"
-                install "pillow==9.2.0"
+                // Moonraker wants pillow>=9.5.0, but Chaquopy's wheel mirror
+                // only ships cp310 pillow up to 9.2.0. The 9.5.0 wheels for all
+                // three ABIs are cross-compiled locally into python_wheels/
+                // (see docs/build-pillow-wheels.md).
+                install "pillow==9.5.0"
+                // The locally-built Pillow wheel links against libjpeg_chaquopy.so
+                // (DT_NEEDED) but, unlike Chaquopy's own Pillow wheel, does not
+                // declare the Requires-Dist on chaquopy-libjpeg. Without this line
+                // libjpeg_chaquopy.so is never bundled and PIL/_imaging.so fails to
+                // dlopen at runtime -> metadata/thumbnail extraction crashes.
+                install "chaquopy-libjpeg==1.5.3"
                 install "streaming-form-data==1.15.0"
                 install "distro==1.9.0"
-                install "inotify-simple==1.3.5"
+                install "inotify-simple==2.0.1"
                 install "libnacl==2.1.0"
-                install "paho-mqtt==1.6.1"
+                install "paho-mqtt==2.1.0"
                 install "zeroconf==0.131.0"
                 install "preprocess-cancellation==0.2.1"
-                install "jinja2==3.1.4"
-                install "dbus-next==0.2.3"
-                install "apprise==1.8.0"
+                install "jinja2==3.1.6"
+                install "dbus-fast==5.0.22"
+                install "apprise==1.13.0"
                 install "ldap3==2.9.1"
                 install "python-periphery==2.4.1"
                 install "pynacl==1.5.0"
+                install "importlib_metadata==9.0.0"
 
                 install "numpy==1.26.2"
                 install "click==8.1.8"
@@ -109,7 +130,9 @@ android {
 
     buildTypes {
         release {
-            signingConfig signingConfigs.release
+            if (hasReleaseKeystore) {
+                signingConfig signingConfigs.release
+            }
             buildConfigField "boolean", "IS_GOOGLE_PLAY", "false"
             buildConfigField "String", "COMMIT", "\"" + commit + "\""
             minifyEnabled true
@@ -220,6 +243,16 @@ static String getGitCommitHash(File dir) {
 }
 
 static void collectFiles(File f, List<File> files) {
+    // Never bundle Python bytecode caches. They are (a) machine/interpreter
+    // specific, (b) gitignored so they slip in unnoticed after any local
+    // `python`/`make menuconfig` run, and (c) silently dropped from the APK by
+    // aapt2's default ignore pattern (any dir starting with "_"), which then
+    // makes BundleInstaller.unpack() throw FileNotFoundException on device
+    // because index.json still lists them -> no printer profiles load.
+    def name = f.getName()
+    if (name == '__pycache__' || name.endsWith('.pyc') || name.endsWith('.pyo')) {
+        return
+    }
     if (f.isDirectory()) {
         f.listFiles().each {
             collectFiles(it, files)
@@ -330,7 +363,9 @@ tasks.register('bundleKlipper') {
         var assets = file('src/main/assets')
         var versionFile = new File(assets, 'bundle_version')
         var kalicoHash = file('src/main/kalico').exists() ? getGitCommitHash(file('src/main/kalico')) : 'none'
-        var version = 'klipper-' + getGitCommitHash(file('src/main/klipper')) + '_kalico-' + kalicoHash + '_moonraker-' + getGitCommitHash(file('src/main/moonraker')) + '_happyhare-' + getGitCommitHash(file('src/main/happyhare')) + '_klipper_tmc_autotune-' + getGitCommitHash(file('src/main/klipper_tmc_autotune')) + '_moonraker_timelapse-' + getGitCommitHash(file('src/main/moonraker_timelapse')) + '_beamext-' + file('src/main/assets/klipper/beam_ext/ext_version').text
+        var addonsVersionFile = file('src/main/assets/klipper/addons_version')
+        var addonsVersion = addonsVersionFile.exists() ? addonsVersionFile.text.trim() : '0'
+        var version = 'klipper-' + getGitCommitHash(file('src/main/klipper')) + '_kalico-' + kalicoHash + '_moonraker-' + getGitCommitHash(file('src/main/moonraker')) + '_happyhare-' + getGitCommitHash(file('src/main/happyhare')) + '_klipper_tmc_autotune-' + getGitCommitHash(file('src/main/klipper_tmc_autotune')) + '_moonraker_timelapse-' + getGitCommitHash(file('src/main/moonraker_timelapse')) + '_beamext-' + file('src/main/assets/klipper/beam_ext/ext_version').text + '_addons-' + addonsVersion
         if (!versionFile.exists() || versionFile.text != version) {
             var files = new ArrayList<File>()
             collectFiles(file('src/main/assets/klipper/klippy'), files)
@@ -368,17 +403,23 @@ tasks.register('bundleKlipper') {
                 Files.copy(it.toPath(), f.toPath(), StandardCopyOption.REPLACE_EXISTING)
             }
 
-            files.clear()
-            klippy = file('src/main/klipper_tmc_autotune')
-            collectFiles(klippy, files)
-            files.each {
-                if (!it.getName().endsWith(".py") && !it.getName().endsWith(".cfg")) return
+            // Vendored Klipper add-on mods (pure-python extras, dormant until the
+            // matching [section] is added to printer.cfg). See docs/mods/.
+            ['klipper_tmc_autotune', 'klipper_led_effect', 'klipper_z_calibration',
+             'klipper_auto_speed'].each { modName ->
+                files.clear()
+                klippy = file('src/main/' + modName)
+                collectFiles(klippy, files)
+                files.each {
+                    if (!it.getName().endsWith(".py") && !it.getName().endsWith(".cfg")) return
 
-                var sub = it.getAbsolutePath().substring(klippy.getAbsolutePath().length() + 1).replace('\\', '/')
-                arr.put('klippy/extras/' + sub)
-                var f = new File(assets, 'klipper/klippy/extras/' + sub)
-                f.getParentFile().mkdirs()
-                Files.copy(it.toPath(), f.toPath(), StandardCopyOption.REPLACE_EXISTING)
+                    var sub = it.getAbsolutePath().substring(klippy.getAbsolutePath().length() + 1).replace('\\', '/')
+                    if (sub.startsWith(".") || sub.contains("/.")) return
+                    arr.put('klippy/extras/' + sub)
+                    var f = new File(assets, 'klipper/klippy/extras/' + sub)
+                    f.getParentFile().mkdirs()
+                    Files.copy(it.toPath(), f.toPath(), StandardCopyOption.REPLACE_EXISTING)
+                }
             }
 
             files.clear()
@@ -437,18 +478,21 @@ tasks.register('bundleKlipper') {
                     Files.copy(it.toPath(), f.toPath(), StandardCopyOption.REPLACE_EXISTING)
                 }
 
-                files.clear()
-                klippy = file('src/main/klipper_tmc_autotune')
-                collectFiles(klippy, files)
-                files.each {
-                    if (!it.getName().endsWith(".py") && !it.getName().endsWith(".cfg")) return
+                ['klipper_tmc_autotune', 'klipper_led_effect', 'klipper_z_calibration',
+                 'klipper_auto_speed'].each { modName ->
+                    files.clear()
+                    klippy = file('src/main/' + modName)
+                    collectFiles(klippy, files)
+                    files.each {
+                        if (!it.getName().endsWith(".py") && !it.getName().endsWith(".cfg")) return
 
-                    var sub = it.getAbsolutePath().substring(klippy.getAbsolutePath().length() + 1).replace('\\', '/')
-                    if (sub.startsWith(".") || sub.contains("/.")) return
-                    arr.put('klippy/extras/' + sub)
-                    var f = new File(assets, 'kalico/klippy/extras/' + sub)
-                    f.getParentFile().mkdirs()
-                    Files.copy(it.toPath(), f.toPath(), StandardCopyOption.REPLACE_EXISTING)
+                        var sub = it.getAbsolutePath().substring(klippy.getAbsolutePath().length() + 1).replace('\\', '/')
+                        if (sub.startsWith(".") || sub.contains("/.")) return
+                        arr.put('klippy/extras/' + sub)
+                        var f = new File(assets, 'kalico/klippy/extras/' + sub)
+                        f.getParentFile().mkdirs()
+                        Files.copy(it.toPath(), f.toPath(), StandardCopyOption.REPLACE_EXISTING)
+                    }
                 }
 
                 files.clear()
@@ -480,6 +524,21 @@ tasks.register('bundleKlipper') {
                 f.getParentFile().mkdirs()
                 Files.copy(it.toPath(), f.toPath(), StandardCopyOption.REPLACE_EXISTING)
             }
+
+            // Moonraker reports its version from git / pip metadata / a version
+            // file — the bundle is none of those, so /server/info returned
+            // "Version: ?". Stamp moonraker/__version__.py (the path pdm-build
+            // would generate) from the vendored changelog's top entry.
+            var mrChangelog = file('src/main/moonraker/docs/changelog.md')
+            var mrVersion = 'v0.0.0-beam'
+            if (mrChangelog.exists()) {
+                var mrMatch = (mrChangelog.text =~ /(?m)^##\s*\[([0-9]+\.[0-9]+\.[0-9]+)\]/)
+                if (mrMatch.find()) mrVersion = 'v' + mrMatch.group(1) + '-beam'
+            }
+            var mrVerFile = new File(assets, 'moonraker/moonraker/__version__.py')
+            mrVerFile.getParentFile().mkdirs()
+            mrVerFile.text = "__version__ = '" + mrVersion + "'\n"
+            arr.put('moonraker/__version__.py')
 
             moonraker = file('src/main/happyhare/components/')
             files.clear()
